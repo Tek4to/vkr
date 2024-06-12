@@ -1,0 +1,227 @@
+version: '3.8'
+
+volumes:
+  medweb:
+    name: medweb
+  static_files:
+  monitoring:
+  prometheus-db:
+  clickhouse-db:
+  clickhouse-data:
+
+services:
+  web:
+    build: 
+      context: .
+      args: 
+        MEDIA_ROOT: /usr/src/web/media/
+        NN_MODEL_FOLDER: nnModel/
+        BASE_MODEL_FOLDER: base/
+        BASE_MODEL_WEIGHTS: weights.pkl
+    entrypoint: ./entrypoint.sh
+    container_name: web
+    command: python ./medweb/manage.py runserver 0.0.0.0:8000
+    ports:
+      - 8000:8000
+    restart: always
+    env_file:
+      - ./dev.env
+    environment:
+      - CELERY=0
+    depends_on:
+      - db
+      - redis_server
+    volumes:
+      - ./medweb:/usr/src/web/medweb
+      - ./media:/usr/src/web/media 
+      - static_files:/usr/src/web/static_files/
+  db:
+    image: postgres
+    restart: always
+    container_name: db
+    ports:
+      - 8001:5432
+    env_file:
+      - ./dev.env
+    volumes:
+      - medweb:/var/lib/postgresql/data
+      - ./backups:/usr/src/web/backups
+
+  nnapi:
+    build: 
+      context: ./nnapi/
+      args: 
+        MEDIA_ROOT: /usr/src/web/media/
+    depends_on:
+      - web
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+    restart: always
+    container_name: nnapi
+    env_file:
+      - ./dev.env
+    volumes:
+      - ./nnapi:/usr/src/web/nnapi
+      - ./media:/usr/src/web/media 
+  redis_server:
+    image: redis
+    container_name: redis_server
+  celery_server:
+    build: 
+      context: .
+      args: 
+        MEDIA_ROOT: /usr/src/web/media/
+        NN_MODEL_FOLDER: nnModel/
+        BASE_MODEL_FOLDER: base/
+        BASE_MODEL_WEIGHTS: weights.pkl
+    command: bash -c "cd ./medweb && python -m celery -A medweb worker"
+    container_name: celery_server
+    restart: always
+    env_file:
+      - ./dev.env
+    environment:
+      - CELERY=1
+    depends_on:
+      - web
+    volumes:
+      - ./medweb:/usr/src/web/medweb
+      - ./media:/usr/src/web/media 
+  
+  front_server:
+    build: 
+      context: ./nginx/
+    restart: always
+    container_name: front_server
+    depends_on:
+      - web
+    expose:
+      - 8080
+    links:
+      - web
+      - metrics_server
+      - cadvisor
+      - clickhouse
+    volumes:
+      - static_files:/usr/src/web/static_files/
+      - ./media:/usr/src/web/media
+  front_out:
+    build: 
+      context: ./nginx_out/
+    restart: always
+    container_name: front_out
+    depends_on:
+      - front_server
+      - prometheus
+    ports:
+      - 49118:8080
+    volumes:
+      - static_files:/usr/src/web/static_files/
+      - ./media:/usr/src/web/media
+
+  metrics_server:
+    build: 
+      context: ./metrics/
+    command:  python ./metrics.py
+    container_name: metrics_server
+    depends_on:
+      - web
+    ports:
+      - 8003:8003
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+    volumes:
+     - ./metrics:/usr/src/web/metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    command:
+      - '-port=8020'
+    ports:
+      - 8020:8020
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+  nginx_exporter:
+    image: nginx/nginx-prometheus-exporter
+    container_name: nginx_exporter
+    restart: always
+    ports:                                                                                                            
+      - "9113:9113"
+    depends_on:
+      - front_server
+    command:
+      - -nginx.scrape-uri
+      - http://front_server:8080/metrics/stub_status
+    volumes:
+      - monitoring:/usr/src/monitoring
+
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    command:
+      - '--web.route-prefix=/metrics/prometheus'
+      - '--web.external-url=http://front_server:49118/metrics/prometheus'
+    ports:
+      - "9090:9090"
+    depends_on:
+      - front_server
+    links:
+      - nginx_exporter
+      - metrics_server
+      - cadvisor
+      - web
+    volumes:
+      - ./prometheus.yml:/prometheus/prometheus.yml
+      - prometheus-db:/prometheus
+
+  clickhouse:
+    image: yandex/clickhouse-server
+    container_name: clickhouse
+    ports:
+      - "8123:8123" # http
+      - "9000:9000" # tcp
+      - "9004:9004" # musqol
+    volumes:
+      - ./config/clickhouse/clickhouse-config.xml:/etc/clickhouse-server/config.xml
+      - clickhouse-db:/var/lib/clickhouse
+
+  clickhouse-init:
+    image: yandex/clickhouse-server
+    volumes:
+      - "./config/clickhouse/init.sql:/init.sql"
+    entrypoint: |
+      bash -c '
+        sleep 5
+        export HOME=/var/lib/clickhouse/
+        cat /init.sql | clickhouse client --host clickhouse --multiquery'
+    links:
+      - clickhouse
+
+  carbon-clickhouse:
+    image: lomik/carbon-clickhouse
+    container_name: carbon-ch
+    volumes:
+      - "clickhouse-data:/data/carbon-clickhouse"
+      - "./config/clickhouse/carbon-clickhouse.conf:/etc/carbon-clickhouse/carbon-clickhouse.conf"
+    ports:
+      - "2003:2003" 
+      - "2003:2003/udp" 
+      - "2004:2004" 
+      - "2006:2006" 
+    links:
+      - clickhouse
+
+# networks:
+#   default:
+#     external:
+#       name: complex_net

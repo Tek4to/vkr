@@ -1,0 +1,16 @@
+FROM python:3.9
+WORKDIR /usr/src/web/nnapi
+
+RUN python -m pip install --upgrade pip
+RUN apt-get update
+RUN apt-get install ffmpeg libsm6 libxext6  -y
+COPY ./requirements.txt .
+
+COPY ./research/ ./research/
+COPY ./server/ ./server/
+RUN pip install -r ./requirements.txt
+ARG MEDIA_ROOT=/usr/src/web/media
+ENV MEDIA_ROOT=$MEDIA_ROOT
+RUN mkdir $MEDIA_ROOT
+ENV PYTHONUNBUFFERED=1
+CMD uvicorn --host ${NN_API_HOST} --port ${NN_API_PORT} --workers 1 server.main:app 

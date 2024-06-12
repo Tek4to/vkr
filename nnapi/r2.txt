@@ -1,0 +1,6 @@
+segmentation-models-pytorch
+PyYAML
+Pydicom
+fastapi
+uvicorn
+zipp

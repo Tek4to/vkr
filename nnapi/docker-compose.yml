@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  nnapi:
+    build: 
+      context: .
+      args: 
+        MEDIA_ROOT: /usr/src/web/media/
+    entrypoint: ./entrypoint.sh
+    restart: always
+    env_file:
+      - ./.dev.env
+    volumes:
+      - nnweights:/usr/src/web/media/nnweights/
+
+volumes:
+  medweb:
+  nnweights:
